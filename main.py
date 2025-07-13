@@ -740,4 +740,275 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Handle answers
     elif data.startswith('answer_') or data.startswith('choice_'):
         parts = data.split('_')
-        result_type = parts[1]  #
+        result_type = parts[1]  # correct/incorrect
+        confidence = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 3
+        session_id = '_'.join(parts[3:]) if len(parts) > 3 else '_'.join(parts[2:])
+        
+        session = context.bot_data['vocab_bot'].session_manager.get_session(session_id)
+        if not session:
+            return
+        
+        data_session = session['data']
+        current_index = data_session['current_index']
+        current_word = data_session['words'][current_index]
+        
+        # Calculate response time
+        response_time = time.time() - data_session.get('question_start_time', time.time())
+        
+        # Record result
+        result = {
+            'row_number': current_word['row_number'],
+            'correct': result_type == 'correct',
+            'confidence': confidence,
+            'response_time': response_time,
+            'word': current_word['Word']
+        }
+        data_session['results'].append(result)
+        
+        # Move to next question
+        data_session['current_index'] += 1
+        context.bot_data['vocab_bot'].session_manager.update_session(session_id, data_session)
+        
+        await show_review_question(update, context, session_id)
+    
+    # Spelling mode handlers
+    elif data.startswith('spell_'):
+        action = data.split('_')[1]
+        session_id = '_'.join(data.split('_')[2:])
+        
+        session = context.bot_data['vocab_bot'].session_manager.get_session(session_id)
+        if not session:
+            return
+            
+        current_word = session['data']['words'][session['data']['current_index']]
+        
+        if action == 'prompt':
+            await query.edit_message_text(
+                f"✍️ **Type the word for this definition:**\n\n"
+                f"📖 {current_word['Definition']}\n\n"
+                f"Reply with your answer!",
+                parse_mode='Markdown'
+            )
+            # Set flag to expect text input
+            session['data']['expecting_spell_input'] = True
+            context.bot_data['vocab_bot'].session_manager.update_session(session_id, session['data'])
+            
+        elif action == 'show':
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ I knew it", callback_data=f"answer_correct_4_{session_id}"),
+                    InlineKeyboardButton("❌ I didn't know", callback_data=f"answer_incorrect_1_{session_id}")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(
+                f"📖 **Definition:** {current_word['Definition']}\n\n"
+                f"✅ **Answer:** {current_word['Word']}\n\n"
+                f"Did you know this?",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+
+async def handle_spelling_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle spelling test input"""
+    user_id = update.effective_user.id
+    user_input = update.message.text.strip().lower()
+    
+    # Find active spelling session
+    session_manager = context.bot_data['vocab_bot'].session_manager
+    active_session = None
+    
+    for session_id, session in session_manager.sessions.items():
+        if (session['user_id'] == user_id and 
+            session['type'] == 'review' and 
+            session['data'].get('expecting_spell_input')):
+            active_session = session
+            break
+    
+    if not active_session:
+        return  # No active spelling session
+    
+    data_session = active_session['data']
+    current_word = data_session['words'][data_session['current_index']]
+    correct_word = current_word['Word'].lower()
+    
+    # Check if spelling is correct (allow minor typos)
+    is_correct = user_input == correct_word
+    if not is_correct:
+        # Simple fuzzy matching for typos
+        import difflib
+        similarity = difflib.SequenceMatcher(None, user_input, correct_word).ratio()
+        is_correct = similarity >= 0.8  # 80% similarity threshold
+    
+    # Clear the input expectation flag
+    data_session['expecting_spell_input'] = False
+    
+    # Calculate confidence based on accuracy
+    confidence = 5 if user_input == correct_word else (4 if is_correct else 1)
+    
+    response_time = time.time() - data_session.get('question_start_time', time.time())
+    
+    # Record result
+    result = {
+        'row_number': current_word['row_number'],
+        'correct': is_correct,
+        'confidence': confidence,
+        'response_time': response_time,
+        'word': current_word['Word']
+    }
+    data_session['results'].append(result)
+    data_session['current_index'] += 1
+    
+    # Show feedback
+    if is_correct:
+        feedback = f"✅ **Correct!** {current_word['Word']}"
+        if user_input != correct_word:
+            feedback += f"\n(You wrote: {user_input})"
+    else:
+        feedback = f"❌ **Incorrect!**\nYou wrote: {user_input}\nCorrect: {current_word['Word']}"
+    
+    await update.message.reply_text(feedback, parse_mode='Markdown')
+    
+    # Continue to next question
+    session_manager.update_session(session_id, data_session)
+    
+    # Small delay before next question
+    await asyncio.sleep(1)
+    await show_review_question(update, context, session_id)
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Enhanced stats with comprehensive analytics"""
+    user_id = update.effective_user.id
+    
+    try:
+        analytics = await context.bot_data['vocab_bot'].get_user_analytics(user_id)
+        
+        if not analytics or analytics['total_words'] == 0:
+            await update.message.reply_text(
+                "📊 **No vocabulary data yet!**\n\n"
+                "Start adding words to see your progress! 🚀"
+            )
+            return
+        
+        # Create progress bar
+        mastery_percentage = (analytics['mastered_words'] / analytics['total_words']) * 100
+        progress_bar = "█" * int(mastery_percentage / 10) + "░" * (10 - int(mastery_percentage / 10))
+        
+        # Learning stage distribution
+        stages_text = f"""
+📚 **Learning Stages:**
+🆕 New: {analytics['new_words']}
+📖 Learning: {analytics['learning_words']}
+🎯 Mastered: {analytics['mastered_words']}
+        """
+        
+        # Performance metrics
+        performance_text = f"""
+📊 **Performance:**
+✅ Success Rate: {analytics['success_rate']}%
+🧠 Avg Difficulty: {analytics['avg_ease_factor']}/2.5
+📝 Total Reviews: {analytics['total_reviews']}
+🔥 Study Streak: {analytics['streak_days']} days
+        """
+        
+        # Study recommendations
+        if analytics['due_count'] > 0:
+            recommendation = f"🎯 {analytics['due_count']} words ready for review!"
+        elif analytics['success_rate'] < 70:
+            recommendation = "💪 Focus on reviewing difficult words"
+        elif analytics['new_words'] > analytics['mastered_words']:
+            recommendation = "📚 Continue adding new vocabulary"
+        else:
+            recommendation = "🌟 Great progress! Keep it up!"
+        
+        stats_text = f"""
+📊 **Your Vocabulary Analytics**
+
+📈 **Progress: {mastery_percentage:.1f}%**
+{progress_bar}
+
+📋 **Overview:**
+Total Words: **{analytics['total_words']}**
+{stages_text}
+{performance_text}
+
+💡 **Recommendation:**
+{recommendation}
+
+🎓 Keep learning! Every word counts! ✨
+        """
+        
+        await update.message.reply_text(stats_text, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Error in stats_command: {e}")
+        await update.message.reply_text("❌ Error getting stats. Please try again.")
+
+async def cleanup_handler(context: ContextTypes.DEFAULT_TYPE):
+    """Periodic cleanup of old sessions and batch operations"""
+    try:
+        # Clean up old sessions
+        if 'vocab_bot' in context.bot_data:
+            context.bot_data['vocab_bot'].session_manager.cleanup_old_sessions()
+            
+            # Execute pending batch operations
+            if context.bot_data['vocab_bot']._batch_operations:
+                await context.bot_data['vocab_bot']._execute_batch_operations()
+        
+        logger.info("Cleanup completed successfully")
+    except Exception as e:
+        logger.error(f"Error in cleanup: {e}")
+
+def main():
+    """Main function to run the bot"""
+    # Get environment variables
+    telegram_token = os.getenv('TELEGRAM_TOKEN')
+    google_creds = os.getenv('GOOGLE_CREDENTIALS')
+    sheet_name = os.getenv('SHEET_NAME', 'VocabularyBot')
+    
+    if not telegram_token or not google_creds:
+        raise ValueError("Missing required environment variables: TELEGRAM_TOKEN, GOOGLE_CREDENTIALS")
+    
+    # Initialize the vocabulary bot
+    try:
+        vocab_bot = VocabularyBot(telegram_token, google_creds, sheet_name)
+    except Exception as e:
+        logger.error(f"Failed to initialize bot: {e}")
+        raise
+    
+    # Create Telegram application
+    application = Application.builder().token(telegram_token).build()
+    
+    # Store vocab_bot in bot_data for access in handlers
+    application.bot_data['vocab_bot'] = vocab_bot
+    
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("review", review_command))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    
+    # Add spelling input handler (must come before general message handler)
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & ~(filters.Regex(r'.*=.*')), 
+        handle_spelling_input
+    ))
+    
+    # Add word addition handler
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.Regex(r'.*=.*'), 
+        add_word_handler
+    ))
+    
+    # Add periodic cleanup job (every 30 minutes)
+    application.job_queue.run_repeating(cleanup_handler, interval=1800, first=300)
+    
+    logger.info("Bot starting...")
+    
+    # Start the bot
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == '__main__':
+    main()
