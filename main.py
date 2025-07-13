@@ -1009,46 +1009,50 @@ def main():
     if not telegram_token:
         raise ValueError("Missing required environment variable: TELEGRAM_TOKEN")
     
-    # Create Telegram application
-    application = Application.builder().token(telegram_token).build()
-    
-    # Initialize the vocabulary bot
-    async def post_init(application):
+    # Create event loop for initialization
+    async def initialize_and_run():
+        # Initialize the vocabulary bot
         vocab_bot = VocabularyBot(telegram_token)
         await vocab_bot.initialize()
+        
+        # Create Telegram application
+        application = Application.builder().token(telegram_token).build()
+        
+        # Store vocab_bot in bot_data for access in handlers
         application.bot_data['vocab_bot'] = vocab_bot
+        
+        # Add handlers
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("review", review_command))
+        application.add_handler(CommandHandler("stats", stats_command))
+        application.add_handler(CallbackQueryHandler(button_handler))
+        
+        # Add spelling input handler (must come before general message handler)
+        application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND & ~(filters.Regex(r'.*=.*')), 
+            handle_spelling_input
+        ))
+        
+        # Add word addition handler
+        application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND & filters.Regex(r'.*=.*'), 
+            add_word_handler
+        ))
+        
+        # Add periodic cleanup job (every 30 minutes)
+        application.job_queue.run_repeating(cleanup_handler, interval=1800, first=300)
+        
+        # Add daily backup job (every 24 hours)
+        application.job_queue.run_repeating(backup_database, interval=86400, first=3600)
+        
+        logger.info("Bot starting with SQLite database...")
+        
+        # Start the bot
+        await application.run_polling(allowed_updates=Update.ALL_TYPES)
     
-    application.post_init = post_init
-    
-    # Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("review", review_command))
-    application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    
-    # Add spelling input handler (must come before general message handler)
-    application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & ~(filters.Regex(r'.*=.*')), 
-        handle_spelling_input
-    ))
-    
-    # Add word addition handler
-    application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.Regex(r'.*=.*'), 
-        add_word_handler
-    ))
-    
-    # Add periodic cleanup job (every 30 minutes)
-    application.job_queue.run_repeating(cleanup_handler, interval=1800, first=300)
-    
-    # Add daily backup job (every 24 hours)
-    application.job_queue.run_repeating(backup_database, interval=86400, first=3600)
-    
-    logger.info("Bot starting with SQLite database...")
-    
-    # Start the bot
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Run the bot
+    asyncio.run(initialize_and_run())
 
 if __name__ == '__main__':
     main()
