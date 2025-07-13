@@ -1040,11 +1040,16 @@ def main():
             add_word_handler
         ))
         
-        # Add periodic cleanup job (every 30 minutes)
-        application.job_queue.run_repeating(cleanup_handler, interval=1800, first=300)
-        
-        # Add daily backup job (every 24 hours)
-        application.job_queue.run_repeating(backup_database, interval=86400, first=3600)
+        # Add periodic cleanup job (every 30 minutes) - with fallback
+        try:
+            if application.job_queue:
+                application.job_queue.run_repeating(cleanup_handler, interval=1800, first=300)
+                application.job_queue.run_repeating(backup_database, interval=86400, first=3600)
+                logger.info("Scheduled cleanup and backup jobs")
+            else:
+                logger.warning("JobQueue not available - running without scheduled tasks")
+        except Exception as e:
+            logger.warning(f"Could not set up scheduled jobs: {e}")
         
         logger.info("Bot starting with SQLite database...")
         
