@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+.env
+vocabulary.db
+vocabulary_backup_*.db
+.DS_Store
+3. Deploy on Render
