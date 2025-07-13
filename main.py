@@ -532,8 +532,16 @@ async def review_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Enhanced review session with multiple modes"""
     user_id = update.effective_user.id
     
-    # Clean up old sessions
+    # Clean up old sessions (replaces scheduled job)
     context.bot_data['vocab_bot'].session_manager.cleanup_old_sessions()
+    
+    # Trigger backup occasionally (every 50th review)
+    import random
+    if random.randint(1, 50) == 1:
+        try:
+            await backup_database(context)
+        except Exception as e:
+            logger.warning(f"Background backup failed: {e}")
     
     due_words = await context.bot_data['vocab_bot'].db.get_due_words(user_id, 10)
     
@@ -1040,18 +1048,10 @@ def main():
             add_word_handler
         ))
         
-        # Add periodic cleanup job (every 30 minutes) - with fallback
-        try:
-            if application.job_queue:
-                application.job_queue.run_repeating(cleanup_handler, interval=1800, first=300)
-                application.job_queue.run_repeating(backup_database, interval=86400, first=3600)
-                logger.info("Scheduled cleanup and backup jobs")
-            else:
-                logger.warning("JobQueue not available - running without scheduled tasks")
-        except Exception as e:
-            logger.warning(f"Could not set up scheduled jobs: {e}")
-        
+        # Note: Scheduled jobs disabled for simplified deployment
+        # Manual cleanup can be triggered or run periodically in production
         logger.info("Bot starting with SQLite database...")
+        logger.info("Note: Automatic cleanup and backup jobs are disabled in this version")
         
         # Start the bot
         await application.run_polling(allowed_updates=Update.ALL_TYPES)
